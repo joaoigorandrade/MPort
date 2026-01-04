@@ -1,93 +1,215 @@
 import { useState, useEffect, useCallback } from 'react';
 import './App.css';
-import { fetchStockPrices } from './services/stockService';
-
-// Portfolio data - customize your holdings here
-// You can add any stock symbols (e.g., AAPL, GOOGL, TSLA, MSFT)
-// or crypto symbols with -USD suffix (e.g., BTC-USD, ETH-USD)
-const PORTFOLIO = [
-  { symbol: 'AAPL', name: 'Apple Inc.', amount: 10, costBasis: 1500 },
-  { symbol: 'GOOGL', name: 'Alphabet Inc.', amount: 5, costBasis: 700 },
-  { symbol: 'TSLA', name: 'Tesla Inc.', amount: 8, costBasis: 2000 },
-  { symbol: 'BTC-USD', name: 'Bitcoin', amount: 0.5, costBasis: 15000 },
-  { symbol: 'ETH-USD', name: 'Ethereum', amount: 4.2, costBasis: 8400 },
-];
-
-const ASSET_COLORS = {
-  AAPL: { primary: '#A6B1E1', gradient: 'linear-gradient(135deg, #A6B1E1 0%, #DCD6F7 100%)' },
-  GOOGL: { primary: '#4285F4', gradient: 'linear-gradient(135deg, #4285F4 0%, #34A853 100%)' },
-  TSLA: { primary: '#E82127', gradient: 'linear-gradient(135deg, #E82127 0%, #CC0000 100%)' },
-  'BTC-USD': { primary: '#F7931A', gradient: 'linear-gradient(135deg, #F7931A 0%, #FFAB40 100%)' },
-  'ETH-USD': { primary: '#627EEA', gradient: 'linear-gradient(135deg, #627EEA 0%, #8B9FFF 100%)' },
-};
+import {
+  getHoldings,
+  addHolding,
+  deleteHolding,
+  getTransactions,
+  addTransaction,
+  deleteTransaction,
+  exportData,
+  importData,
+} from './services/storageService';
+import { getCryptoColor, toCryptoComSymbol, POPULAR_CRYPTOS } from './services/priceService';
+import Modal from './components/Modal';
+import AddHoldingModal from './components/AddHoldingModal';
+import AddTransactionModal from './components/AddTransactionModal';
+import ConfirmModal from './components/ConfirmModal';
 
 function App() {
+  // Core state
+  const [holdings, setHoldings] = useState([]);
+  const [transactions, setTransactions] = useState([]);
   const [prices, setPrices] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [priceHistory, setPriceHistory] = useState([]);
 
-  const fetchPrices = useCallback(async () => {
-    try {
-      setLoading(true);
+  // Modal state
+  const [showAddHolding, setShowAddHolding] = useState(false);
+  const [showAddTransaction, setShowAddTransaction] = useState(false);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [preselectedHoldingId, setPreselectedHoldingId] = useState(null);
 
-      // Get all symbols from portfolio
-      const symbols = PORTFOLIO.map(holding => holding.symbol);
-
-      // Fetch real prices from Yahoo Finance
-      const realPrices = await fetchStockPrices(symbols);
-
-      setPrices(realPrices);
-      setLastUpdated(new Date());
-      setLoading(false);
-
-      // Add to price history for chart
-      setPriceHistory(prev => {
-        const newEntry = {
-          time: new Date(),
-          value: PORTFOLIO.reduce((sum, holding) => {
-            return sum + (holding.amount * (realPrices[holding.symbol] || 0));
-          }, 0)
-        };
-        const updated = [...prev, newEntry].slice(-20);
-        return updated;
-      });
-    } catch (error) {
-      console.error('Error fetching prices:', error);
-      setLoading(false);
-    }
+  // Load data from localStorage on mount
+  useEffect(() => {
+    const loadedHoldings = getHoldings();
+    const loadedTransactions = getTransactions();
+    setHoldings(loadedHoldings);
+    setTransactions(loadedTransactions);
   }, []);
 
-  useEffect(() => {
-    fetchPrices();
-    const interval = setInterval(fetchPrices, 30000);
-    return () => clearInterval(interval);
-  }, [fetchPrices]);
+  // Fetch prices for all holdings
+  const fetchPrices = useCallback(async () => {
+    if (holdings.length === 0) return;
+    
+    setLoading(true);
+    const newPrices = {};
 
-  const calculatePortfolioValue = () => {
-    return PORTFOLIO.reduce((sum, holding) => {
-      const price = prices[holding.symbol] || 0;
-      return sum + (holding.amount * price);
+    for (const holding of holdings) {
+      try {
+        const cryptoSymbol = toCryptoComSymbol(holding.symbol);
+        // Use the ticker endpoint to get real-time price
+        const response = await fetch(`https://api.crypto.com/v2/public/get-ticker?instrument_name=${cryptoSymbol}`);
+        const data = await response.json();
+        
+        if (data.result && data.result.data) {
+          newPrices[holding.symbol] = parseFloat(data.result.data.a) || 0; // 'a' is the ask price (current price)
+        } else {
+          newPrices[holding.symbol] = 0;
+        }
+      } catch (error) {
+        console.error(`Error fetching price for ${holding.symbol}:`, error);
+        newPrices[holding.symbol] = prices[holding.symbol] || 0;
+      }
+    }
+
+    setPrices(newPrices);
+    setLastUpdated(new Date());
+    setLoading(false);
+
+    // Add to price history for chart
+    const portfolioValue = holdings.reduce((sum, holding) => {
+      return sum + (holding.amount * (newPrices[holding.symbol] || 0));
     }, 0);
+
+    if (portfolioValue > 0) {
+      setPriceHistory(prev => {
+        const newEntry = { time: new Date(), value: portfolioValue };
+        return [...prev, newEntry].slice(-50);
+      });
+    }
+  }, [holdings, prices]);
+
+  // Fetch prices on mount and periodically
+  useEffect(() => {
+    if (holdings.length > 0) {
+      fetchPrices();
+      const interval = setInterval(fetchPrices, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [holdings.length]); // Only re-run when holdings count changes
+
+  // Manual refresh
+  const handleRefresh = () => {
+    fetchPrices();
   };
 
-  const totalCostBasis = PORTFOLIO.reduce((sum, h) => sum + h.costBasis, 0);
-  const portfolioValue = calculatePortfolioValue();
+  // Add new holding
+  const handleAddHolding = (holdingData) => {
+    const newHolding = addHolding(holdingData);
+    setHoldings(prev => [...prev, newHolding]);
+    // Fetch price for new holding
+    setTimeout(fetchPrices, 100);
+  };
+
+  // Delete holding
+  const handleDeleteHolding = (holdingId) => {
+    const holding = holdings.find(h => h.id === holdingId);
+    setDeleteTarget({ type: 'holding', id: holdingId, name: holding?.symbol });
+    setShowConfirmDelete(true);
+  };
+
+  const confirmDelete = () => {
+    if (deleteTarget.type === 'holding') {
+      deleteHolding(deleteTarget.id);
+      setHoldings(prev => prev.filter(h => h.id !== deleteTarget.id));
+      setTransactions(prev => prev.filter(t => t.holdingId !== deleteTarget.id));
+    } else if (deleteTarget.type === 'transaction') {
+      deleteTransaction(deleteTarget.id);
+      // Reload holdings to get updated amounts
+      setHoldings(getHoldings());
+      setTransactions(prev => prev.filter(t => t.id !== deleteTarget.id));
+    }
+    setDeleteTarget(null);
+  };
+
+  // Add transaction
+  const handleAddTransaction = (txData) => {
+    const newTx = addTransaction(txData);
+    setTransactions(prev => [...prev, newTx]);
+    // Reload holdings to get updated amounts
+    setHoldings(getHoldings());
+  };
+
+  // Delete transaction
+  const handleDeleteTransaction = (txId) => {
+    const tx = transactions.find(t => t.id === txId);
+    const holding = holdings.find(h => h.id === tx?.holdingId);
+    setDeleteTarget({ 
+      type: 'transaction', 
+      id: txId, 
+      name: `${tx?.type} of ${holding?.symbol}` 
+    });
+    setShowConfirmDelete(true);
+  };
+
+  // Quick add transaction from holding card
+  const handleQuickAddTransaction = (holdingId) => {
+    setPreselectedHoldingId(holdingId);
+    setShowAddTransaction(true);
+  };
+
+  // Export data
+  const handleExport = () => {
+    const data = exportData();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `portfolio-backup-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Import data
+  const handleImport = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = JSON.parse(e.target.result);
+          importData(data);
+          setHoldings(getHoldings());
+          setTransactions(getTransactions());
+          alert('Data imported successfully!');
+        } catch (error) {
+          alert('Error importing data. Please check the file format.');
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  // Calculate portfolio metrics
+  const totalCostBasis = holdings.reduce((sum, h) => sum + (h.costBasis || 0), 0);
+  const portfolioValue = holdings.reduce((sum, holding) => {
+    const price = prices[holding.symbol] || 0;
+    return sum + (holding.amount * price);
+  }, 0);
   const totalGain = portfolioValue - totalCostBasis;
   const gainPercent = totalCostBasis > 0 ? (totalGain / totalCostBasis) * 100 : 0;
 
-  const holdings = PORTFOLIO.map(holding => {
+  // Enriched holdings with calculated values
+  const enrichedHoldings = holdings.map(holding => {
     const price = prices[holding.symbol] || 0;
     const value = holding.amount * price;
-    const gain = value - holding.costBasis;
+    const gain = value - (holding.costBasis || 0);
     const gainPct = holding.costBasis > 0 ? (gain / holding.costBasis) * 100 : 0;
     const allocation = portfolioValue > 0 ? (value / portfolioValue) * 100 : 0;
+    const color = holding.color || getCryptoColor(holding.symbol);
     
-    return { ...holding, price, value, gain, gainPct, allocation };
-  });
+    return { ...holding, price, value, gain, gainPct, allocation, color };
+  }).sort((a, b) => b.value - a.value);
 
+  // Format helpers
   const formatCurrency = (value) => {
+    if (value === undefined || value === null || isNaN(value)) return '—';
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
@@ -97,11 +219,25 @@ function App() {
   };
 
   const formatNumber = (value, decimals = 2) => {
+    if (value === undefined || value === null || isNaN(value)) return '—';
     return new Intl.NumberFormat('en-US', {
       minimumFractionDigits: decimals,
       maximumFractionDigits: decimals,
     }).format(value);
   };
+
+  const formatDate = (dateStr) => {
+    return new Date(dateStr).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  };
+
+  // Get transactions sorted by date
+  const sortedTransactions = [...transactions].sort((a, b) => 
+    new Date(b.date) - new Date(a.date)
+  );
 
   return (
     <div className="app">
@@ -120,24 +256,27 @@ function App() {
           </div>
           <div className="logo-text">
             <span className="logo-name">Portfolio</span>
-            <span className="logo-tagline">Real-time portfolio tracking</span>
           </div>
         </div>
         
         <div className="header-actions">
-          <div className="last-updated">
-            {lastUpdated && (
-              <>
-                <span className="pulse"></span>
-                Updated {lastUpdated.toLocaleTimeString()}
-              </>
-            )}
-          </div>
-          <button className="refresh-btn" onClick={fetchPrices} disabled={loading}>
+          {lastUpdated && (
+            <div className="last-updated">
+              <span className="pulse"></span>
+              Updated {lastUpdated.toLocaleTimeString()}
+            </div>
+          )}
+          <button className="refresh-btn" onClick={handleRefresh} disabled={loading}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={loading ? 'spinning' : ''}>
               <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
             </svg>
             Refresh
+          </button>
+          <button className="add-btn" onClick={() => setShowAddHolding(true)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            Add Asset
           </button>
         </div>
       </header>
@@ -186,7 +325,9 @@ function App() {
                 </div>
                 <div className="stat-content">
                   <span className="stat-label">Portfolio Value</span>
-                  <span className="stat-value">{loading ? '—' : formatCurrency(portfolioValue)}</span>
+                  <span className="stat-value">
+                    {holdings.length === 0 ? '$0.00' : (loading && !lastUpdated ? '—' : formatCurrency(portfolioValue))}
+                  </span>
                 </div>
               </div>
               
@@ -213,114 +354,137 @@ function App() {
                 <div className="stat-content">
                   <span className="stat-label">Total Gain/Loss</span>
                   <span className={`stat-value ${totalGain >= 0 ? 'positive' : 'negative'}`}>
-                    {loading ? '—' : `${totalGain >= 0 ? '+' : ''}${formatCurrency(totalGain)}`}
-                    <span className="stat-percent">({formatNumber(gainPercent)}%)</span>
+                    {holdings.length === 0 ? '$0.00' : (loading && !lastUpdated ? '—' : (
+                      <>
+                        {totalGain >= 0 ? '+' : ''}{formatCurrency(totalGain)}
+                        <span className="stat-percent">({formatNumber(gainPercent)}%)</span>
+                      </>
+                    ))}
                   </span>
                 </div>
               </div>
             </div>
 
-            <div className="charts-grid">
-              <div className="chart-card allocation-card">
-                <h3>Asset Allocation</h3>
-                <div className="allocation-chart">
-                  <svg viewBox="0 0 100 100" className="donut-chart">
-                    {holdings.reduce((acc, holding, index) => {
-                      const startAngle = acc.angle;
-                      const sweepAngle = (holding.allocation / 100) * 360;
-                      const endAngle = startAngle + sweepAngle;
-                      
-                      const startRad = (startAngle - 90) * Math.PI / 180;
-                      const endRad = (endAngle - 90) * Math.PI / 180;
-                      
-                      const x1 = 50 + 40 * Math.cos(startRad);
-                      const y1 = 50 + 40 * Math.sin(startRad);
-                      const x2 = 50 + 40 * Math.cos(endRad);
-                      const y2 = 50 + 40 * Math.sin(endRad);
-                      
-                      const largeArc = sweepAngle > 180 ? 1 : 0;
-                      
-                      const path = (
-                        <path
-                          key={holding.symbol}
-                          d={`M 50 50 L ${x1} ${y1} A 40 40 0 ${largeArc} 1 ${x2} ${y2} Z`}
-                          fill={ASSET_COLORS[holding.symbol]?.primary || '#666'}
-                          className="donut-segment"
-                          style={{ animationDelay: `${index * 0.1}s` }}
-                        />
-                      );
-                      
-                      acc.paths.push(path);
-                      acc.angle = endAngle;
-                      return acc;
-                    }, { paths: [], angle: 0 }).paths}
-                    <circle cx="50" cy="50" r="25" fill="var(--card-bg)" />
-                  </svg>
-                </div>
-                <div className="allocation-legend">
-                  {holdings.map(holding => (
-                    <div key={holding.symbol} className="legend-item">
-                      <span
-                        className="legend-dot"
-                        style={{ background: ASSET_COLORS[holding.symbol]?.gradient || '#666' }}
-                      ></span>
-                      <span className="legend-symbol">{holding.symbol}</span>
-                      <span className="legend-value">{formatNumber(holding.allocation)}%</span>
-                    </div>
-                  ))}
-                </div>
+            {holdings.length === 0 ? (
+              <div className="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                  <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
+                  <path d="M3.27 6.96L12 12.01l8.73-5.05M12 22.08V12" />
+                </svg>
+                <h3>No assets yet</h3>
+                <p>Add your first cryptocurrency to start tracking your portfolio</p>
+                <button className="btn btn-primary" onClick={() => setShowAddHolding(true)}>
+                  Add Your First Asset
+                </button>
               </div>
-
-              <div className="chart-card performance-card">
-                <h3>Portfolio Performance</h3>
-                <div className="performance-chart">
-                  {priceHistory.length > 1 && (
-                    <svg viewBox="0 0 400 150" preserveAspectRatio="none" className="line-chart">
-                      <defs>
-                        <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                          <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.3" />
-                          <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
-                        </linearGradient>
-                      </defs>
-                      {(() => {
-                        const values = priceHistory.map(p => p.value);
-                        const min = Math.min(...values) * 0.995;
-                        const max = Math.max(...values) * 1.005;
-                        const range = max - min || 1;
+            ) : (
+              <div className="charts-grid">
+                <div className="chart-card allocation-card">
+                  <h3>Asset Allocation</h3>
+                  <div className="allocation-chart">
+                    <svg viewBox="0 0 100 100" className="donut-chart">
+                      {enrichedHoldings.reduce((acc, holding, index) => {
+                        const startAngle = acc.angle;
+                        const sweepAngle = (holding.allocation / 100) * 360;
+                        const endAngle = startAngle + sweepAngle;
                         
-                        const points = priceHistory.map((p, i) => {
-                          const x = (i / (priceHistory.length - 1)) * 400;
-                          const y = 150 - ((p.value - min) / range) * 140 - 5;
-                          return `${x},${y}`;
-                        }).join(' ');
+                        if (sweepAngle <= 0) {
+                          acc.angle = endAngle;
+                          return acc;
+                        }
                         
-                        const areaPoints = `0,150 ${points} 400,150`;
+                        const startRad = (startAngle - 90) * Math.PI / 180;
+                        const endRad = (endAngle - 90) * Math.PI / 180;
                         
-                        return (
-                          <>
-                            <polygon points={areaPoints} fill="url(#chartGradient)" className="chart-area" />
-                            <polyline
-                              points={points}
-                              fill="none"
-                              stroke="var(--accent)"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              className="chart-line"
-                            />
-                          </>
+                        const x1 = 50 + 40 * Math.cos(startRad);
+                        const y1 = 50 + 40 * Math.sin(startRad);
+                        const x2 = 50 + 40 * Math.cos(endRad);
+                        const y2 = 50 + 40 * Math.sin(endRad);
+                        
+                        const largeArc = sweepAngle > 180 ? 1 : 0;
+                        
+                        const path = (
+                          <path
+                            key={holding.id}
+                            d={`M 50 50 L ${x1} ${y1} A 40 40 0 ${largeArc} 1 ${x2} ${y2} Z`}
+                            fill={holding.color}
+                            className="donut-segment"
+                            style={{ animationDelay: `${index * 0.1}s` }}
+                          />
                         );
-                      })()}
+                        
+                        acc.paths.push(path);
+                        acc.angle = endAngle;
+                        return acc;
+                      }, { paths: [], angle: 0 }).paths}
+                      <circle cx="50" cy="50" r="25" fill="var(--card-bg)" />
                     </svg>
-                  )}
-                  {priceHistory.length <= 1 && (
-                    <div className="chart-placeholder">
-                      <span>Collecting data...</span>
-                    </div>
-                  )}
+                  </div>
+                  <div className="allocation-legend">
+                    {enrichedHoldings.map(holding => (
+                      <div key={holding.id} className="legend-item">
+                        <span
+                          className="legend-dot"
+                          style={{ background: holding.color }}
+                        ></span>
+                        <span className="legend-symbol">{holding.symbol}</span>
+                        <span className="legend-value">{formatNumber(holding.allocation)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="chart-card performance-card">
+                  <h3>Portfolio Performance</h3>
+                  <div className="performance-chart">
+                    {priceHistory.length > 1 && (
+                      <svg viewBox="0 0 400 150" preserveAspectRatio="none" className="line-chart">
+                        <defs>
+                          <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.3" />
+                            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+                          </linearGradient>
+                        </defs>
+                        {(() => {
+                          const values = priceHistory.map(p => p.value);
+                          const min = Math.min(...values) * 0.995;
+                          const max = Math.max(...values) * 1.005;
+                          const range = max - min || 1;
+                          
+                          const points = priceHistory.map((p, i) => {
+                            const x = (i / (priceHistory.length - 1)) * 400;
+                            const y = 150 - ((p.value - min) / range) * 140 - 5;
+                            return `${x},${y}`;
+                          }).join(' ');
+                          
+                          const areaPoints = `0,150 ${points} 400,150`;
+                          
+                          return (
+                            <>
+                              <polygon points={areaPoints} fill="url(#chartGradient)" className="chart-area" />
+                              <polyline
+                                points={points}
+                                fill="none"
+                                stroke="var(--accent)"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                className="chart-line"
+                              />
+                            </>
+                          );
+                        })()}
+                      </svg>
+                    )}
+                    {priceHistory.length <= 1 && (
+                      <div className="chart-placeholder">
+                        <span>Collecting data...</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -328,39 +492,82 @@ function App() {
           <div className="holdings">
             <div className="holdings-header">
               <h2>Your Holdings</h2>
-              <span className="holdings-count">{holdings.length} assets</span>
+              <div className="holdings-actions">
+                <span className="holdings-count">{holdings.length} asset{holdings.length !== 1 ? 's' : ''}</span>
+                <button className="add-btn" onClick={() => setShowAddHolding(true)}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  Add Asset
+                </button>
+              </div>
             </div>
-            <div className="holdings-list">
-              {holdings.map((holding, index) => (
-                <div 
-                  key={holding.symbol} 
-                  className="holding-card"
-                  style={{ animationDelay: `${index * 0.05}s` }}
-                >
-                  <div className="holding-icon" style={{ background: ASSET_COLORS[holding.symbol]?.gradient || '#666' }}>
-                    {holding.symbol.charAt(0)}
+            
+            {holdings.length === 0 ? (
+              <div className="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M12 6v6l4 2" />
+                </svg>
+                <h3>No holdings yet</h3>
+                <p>Add your first cryptocurrency to start tracking</p>
+                <button className="btn btn-primary" onClick={() => setShowAddHolding(true)}>
+                  Add Your First Asset
+                </button>
+              </div>
+            ) : (
+              <div className="holdings-list">
+                {enrichedHoldings.map((holding, index) => (
+                  <div 
+                    key={holding.id} 
+                    className="holding-card"
+                    style={{ animationDelay: `${index * 0.05}s` }}
+                  >
+                    <div className="holding-icon" style={{ background: holding.color }}>
+                      {holding.symbol.charAt(0)}
+                    </div>
+                    <div className="holding-info">
+                      <span className="holding-name">{holding.name}</span>
+                      <span className="holding-symbol">{holding.symbol}</span>
+                    </div>
+                    <div className="holding-amount">
+                      <span className="amount-value">{formatNumber(holding.amount, 6)}</span>
+                      <span className="amount-label">{holding.symbol}</span>
+                    </div>
+                    <div className="holding-price">
+                      <span className="price-value">{formatCurrency(holding.price)}</span>
+                      <span className="price-label">Price</span>
+                    </div>
+                    <div className="holding-value">
+                      <span className="value-amount">{formatCurrency(holding.value)}</span>
+                      <span className={`value-change ${holding.gain >= 0 ? 'positive' : 'negative'}`}>
+                        {holding.gain >= 0 ? '+' : ''}{formatNumber(holding.gainPct)}%
+                      </span>
+                    </div>
+                    <div className="holding-actions">
+                      <button 
+                        className="holding-action-btn" 
+                        title="Add transaction"
+                        onClick={() => handleQuickAddTransaction(holding.id)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 5v14M5 12h14" />
+                        </svg>
+                      </button>
+                      <button 
+                        className="holding-action-btn delete" 
+                        title="Delete holding"
+                        onClick={() => handleDeleteHolding(holding.id)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
-                  <div className="holding-info">
-                    <span className="holding-name">{holding.name}</span>
-                    <span className="holding-symbol">{holding.symbol}</span>
-                  </div>
-                  <div className="holding-amount">
-                    <span className="amount-value">{formatNumber(holding.amount, 4)}</span>
-                    <span className="amount-label">{holding.symbol}</span>
-                  </div>
-                  <div className="holding-price">
-                    <span className="price-value">{formatCurrency(holding.price)}</span>
-                    <span className="price-label">Price</span>
-                  </div>
-                  <div className="holding-value">
-                    <span className="value-amount">{formatCurrency(holding.value)}</span>
-                    <span className={`value-change ${holding.gain >= 0 ? 'positive' : 'negative'}`}>
-                      {holding.gain >= 0 ? '+' : ''}{formatNumber(holding.gainPct)}%
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -368,18 +575,130 @@ function App() {
           <div className="transactions">
             <div className="transactions-header">
               <h2>Transaction History</h2>
+              <div className="holdings-actions">
+                <button className="add-btn" onClick={() => {
+                  setPreselectedHoldingId(null);
+                  setShowAddTransaction(true);
+                }}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  Add Transaction
+                </button>
+              </div>
             </div>
-            <div className="transactions-empty">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                <path d="M14 2v6h6" />
-              </svg>
-              <span>No transactions yet</span>
-              <p>Your transaction history will appear here</p>
-            </div>
+            
+            {transactions.length === 0 ? (
+              <div className="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                  <path d="M14 2v6h6" />
+                </svg>
+                <h3>No transactions yet</h3>
+                <p>Record your first buy or sell to track your cost basis</p>
+                <button 
+                  className="btn btn-primary" 
+                  onClick={() => {
+                    setPreselectedHoldingId(null);
+                    setShowAddTransaction(true);
+                  }}
+                  disabled={holdings.length === 0}
+                >
+                  {holdings.length === 0 ? 'Add an asset first' : 'Record Transaction'}
+                </button>
+              </div>
+            ) : (
+              <div className="transactions-list">
+                {sortedTransactions.map(tx => {
+                  const holding = holdings.find(h => h.id === tx.holdingId);
+                  const total = tx.amount * tx.price + (tx.type === 'buy' ? tx.fee : -tx.fee);
+                  
+                  return (
+                    <div key={tx.id} className="transaction-card">
+                      <div className={`transaction-type-badge ${tx.type}`}>
+                        {tx.type === 'buy' ? (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 19V5M5 12l7-7 7 7" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 5v14M5 12l7 7 7-7" />
+                          </svg>
+                        )}
+                      </div>
+                      <div className="transaction-info">
+                        <span className="transaction-title">
+                          {tx.type === 'buy' ? 'Bought' : 'Sold'} {holding?.symbol || 'Unknown'}
+                        </span>
+                        <span className="transaction-date">{formatDate(tx.date)}</span>
+                      </div>
+                      <div className="transaction-amount">
+                        <span>{formatNumber(tx.amount, 6)}</span>
+                        <span>{holding?.symbol}</span>
+                      </div>
+                      <div className="transaction-price">
+                        <span>{formatCurrency(tx.price)}</span>
+                        <span>per unit</span>
+                      </div>
+                      <div className="transaction-total">
+                        <span className={tx.type === 'buy' ? 'negative' : 'positive'}>
+                          {tx.type === 'buy' ? '-' : '+'}{formatCurrency(Math.abs(total))}
+                        </span>
+                        <span>Total</span>
+                      </div>
+                      <button 
+                        className="transaction-delete-btn"
+                        onClick={() => handleDeleteTransaction(tx.id)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </main>
+
+      {/* Modals */}
+      <AddHoldingModal
+        isOpen={showAddHolding}
+        onClose={() => setShowAddHolding(false)}
+        onAdd={handleAddHolding}
+        existingSymbols={holdings.map(h => h.symbol)}
+      />
+
+      <AddTransactionModal
+        isOpen={showAddTransaction}
+        onClose={() => {
+          setShowAddTransaction(false);
+          setPreselectedHoldingId(null);
+        }}
+        onAdd={handleAddTransaction}
+        holdings={holdings}
+        currentPrices={prices}
+        preselectedHoldingId={preselectedHoldingId}
+      />
+
+      <ConfirmModal
+        isOpen={showConfirmDelete}
+        onClose={() => {
+          setShowConfirmDelete(false);
+          setDeleteTarget(null);
+        }}
+        onConfirm={confirmDelete}
+        title={`Delete ${deleteTarget?.type === 'holding' ? 'Asset' : 'Transaction'}`}
+        message={
+          deleteTarget?.type === 'holding'
+            ? `Are you sure you want to delete ${deleteTarget?.name}? This will also delete all associated transactions.`
+            : `Are you sure you want to delete this ${deleteTarget?.name} transaction? This will update your holdings and cost basis.`
+        }
+        confirmText="Delete"
+        variant="danger"
+      />
     </div>
   );
 }
